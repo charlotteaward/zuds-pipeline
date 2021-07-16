@@ -133,7 +133,7 @@ def run_sextractor(image, checkimage_type=None, catalog_type='FITS_LDAC',
     for name in outnames:
         if name.endswith('.cat'):
             product = PipelineFITSCatalog.from_file(name,
-                                                    use_existing_record=True)
+                                                    use_existing_record=False)
         else:
             product = FITSImage.from_file(
                 name, use_existing_record=True

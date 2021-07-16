@@ -22,7 +22,7 @@ from .utils import fid_map
 from .download import safe_download, ipac_authenticate
 
 __all__ = ['FITSImage', 'CalibratableImageBase', 'CalibratableImage',
-           'CalibratedImage', 'ScienceImage']
+           'CalibratedImage', 'ScienceImage', 'PTFScienceImage']
 
 
 class FITSImage(HasWCS):
@@ -342,22 +342,27 @@ class CalibratedImage(CalibratableImage):
     forced_photometry = relationship('ForcedPhotometry', cascade='all')
 
     def force_photometry(self, sources, assume_background_subtracted=False,
-                         use_cutout=False, direct_load=None):
+                         use_cutout=False, direct_load=None, survey='ZTF',apfactor=1.0,useseeing=False):
         """Force aperture photometry at the locations of `sources`.
         Assumes that calibration has already been done.
 
         """
-
+        
         # ensure sources is at least 1d
         sources = np.atleast_1d(sources)
 
         ra = [source.ra for source in sources]
         dec = [source.dec for source in sources]
 
+        if useseeing:
+            seeingarg=self.seeing
+        else:
+            seeingarg=1.0
+
         result = aperture_photometry(
             self, ra, dec, apply_calibration=True,
             assume_background_subtracted=assume_background_subtracted,
-            use_cutout=use_cutout, direct_load=direct_load
+            use_cutout=use_cutout, direct_load=direct_load, survey=survey, apfactor=apfactor, seeing=seeingarg
         )
 
         photometry = []
@@ -384,7 +389,10 @@ class CalibratedImage(CalibratableImage):
     @hybrid_property
     def seeing(self):
         """FWHM of seeing in pixels."""
-        return self.header['SEEING']
+        try:
+            return self.header['SEEING']
+        except KeyError:
+            return self.header['MEDFWHM']
 
     @hybrid_property
     def magzp(self):
@@ -462,6 +470,7 @@ class ScienceImage(CalibratedImage):
             f, use_existing_record=use_existing_record,
             load_others=load_others
         )
+        
         obj.field = obj.header['FIELDID']
         obj.ccdid = obj.header['CCDID']
         obj.qid = obj.header['QID']
@@ -469,7 +478,7 @@ class ScienceImage(CalibratedImage):
 
         if obj.filtercode is None:
             obj.filtercode = fid_map[obj.fid]
-
+            
         fname = obj.header['FILENAME']
 
         if obj.imgtypecode is None:
@@ -477,7 +486,7 @@ class ScienceImage(CalibratedImage):
 
         if obj.filefracday is None:
             obj.filefracday = int(fname.split('_')[1])
-
+        
         for attr, hkw in zip(['obsjd', 'infobits',
                               'pid', 'nid', 'expid',
                               'seeing', 'airmass', 'moonillf', 'moonesb',
@@ -565,4 +574,158 @@ class ScienceImage(CalibratedImage):
         target = self.ipac_path(suffix)
         safe_download(target=target, destination=destination, cookie=cookie,
                       raise_exc=True)
+
+
+class PTFScienceImage(CalibratedImage):
+    """IPAC record of a science image from their pipeline. Contains some
+    metadata that IPAC makes available through its irsa metadata query
+    service.  This class is primarily intended to enable the reflection of
+    IPAC's idea of its science images and which science images exist so that
+    IPAC's world can be compared against the results of this pipeline.
+
+    This class does not map to any file on disk, in the sense that it is not
+    designed to reflect the data or metadata of any local file to memory,
+    but it can be used to download files from the IRSA archive to disk (
+    again, it does not make any attempt to represent the contents of these
+    files, or synchronize their contents on disk to their representation in
+    memory).
+
+    This class represents immutable metadata only.
+    """
+
+    # we dont want science image records to be deleted in a cascade.
+    id = sa.Column(sa.Integer, sa.ForeignKey('calibratedimages.id',
+                                             ondelete='RESTRICT'),
+                   primary_key=True)
+    __mapper_args__ = {'polymorphic_identity': 'sci',
+                       'inherit_condition': id == CalibratedImage.id}
+
+    @classmethod
+    def from_file(cls, f, use_existing_record=True, load_others=True):
+        obj = super().from_file(
+            f, use_existing_record=use_existing_record,
+            load_others=load_others
+        )
+        obj.field = obj.header['PTFFIELD']
+        obj.ccdid = obj.header['CCDID']
+        #CCDID used to make fake QID
+        obj.qid = obj.header['CCDID']
+        fname=f
+        obj.fid = obj.fid = int(fname.split('_')[5][1:])#nt(obj.header['FILTERID'])
+
+        if obj.filtercode is None:
+            try:
+                obj.filtercode = fid_map[obj.fid]
+            except KeyError:
+                obj.filtercode = 'zg'    
+        
+      
+        if obj.imgtypecode is None:
+            obj.imgtypecode = fname.split('.')[0][-1]
+        
+   
+        if obj.filefracday is None:
+            obj.filefracday = int(fname.split('_')[1])
+
+        for attr, hkw in zip(['obsjd',
+                              'pid', 'nid', 'expid',
+                              'airmass', 'moonillf', 'moonesb',
+                              'crpix1', 'crpix2', 'crval1',
+                              'crval2', 'cd11', 'cd12', 'cd21', 'cd22',
+                              'ipac_gid', 'exptime'],
+                             ['OBSJD', 'DBPID',
+                              'DBNID', 'DBEXPID',
+                              'AIRMASS', 'MOONILLF', 'MOONESB',
+                              'CRPIX1', 'CRPIX2',
+                              'CRVAL1', 'CRVAL2', 'CD1_1', 'CD1_2',
+                              'CD2_1', 'CD2_2', 'PTFPID', 'EXPTIME']):
+
+            if getattr(obj, attr) is None:
+                setattr(obj, attr, obj.header[hkw])
+        
+        try:
+            setattr(obj, 'seeing', 'SEEING')
+        except KeyError:
+            setattr(obj, 'seeing', 'MEDFWHM')    
+        
+        try:
+            setattr(obj, 'infobits', 'INFOBITS')
+        except KeyError:
+            setattr(obj, 'infobits', 0)    
+        try:
+            setattr(obj, 'maglimit', 'LMGAPCZP')
+        except KeyError:
+            setattr(obj, 'maglimit', 'LIMITMAG')    
+        return obj
+
+    filtercode = sa.Column(sa.CHAR(2))
+    obsjd = sa.Column(psql.DOUBLE_PRECISION)
+    infobits = sa.Column(sa.Integer)
+    pid = sa.Column(psql.BIGINT)
+    nid = sa.Column(sa.Integer)
+    expid = sa.Column(sa.Integer)
+    itid = sa.Column(sa.Integer)
+    obsdate = sa.Column(sa.DateTime)
+    seeing = sa.Column(sa.Float)
+    airmass = sa.Column(sa.Float)
+    moonillf = sa.Column(sa.Float)
+    moonesb = sa.Column(sa.Float)
+    maglimit = sa.Column(sa.Float)
+    crpix1 = sa.Column(sa.Float)
+    crpix2 = sa.Column(sa.Float)
+    crval1 = sa.Column(sa.Float)
+    crval2 = sa.Column(sa.Float)
+    cd11 = sa.Column(sa.Float)
+    cd12 = sa.Column(sa.Float)
+    cd21 = sa.Column(sa.Float)
+    cd22 = sa.Column(sa.Float)
+    ipac_gid = sa.Column(sa.Integer)
+    imgtypecode = sa.Column(sa.CHAR(1))
+    exptime = sa.Column(sa.Float)
+    filefracday = sa.Column(psql.BIGINT)
+
+    nidind = sa.Index('sci_nid_ind', nid)
+    jdind = sa.Index("sci_obsjd_ind", obsjd)
+
+    ipac_auth = None
+
+    @hybrid_property
+    def obsmjd(self):
+        return self.obsjd - 2400000.5
+
+    @property
+    def mjd(self):
+        return self.obsmjd
+
+    @hybrid_property
+    def filter(self):
+        return 'ztf' + self.filtercode[-1]
+
+    def ipac_path(self, suffix):
+        """The url of a particular file corresponding to this metadata
+        record, with suffix `suffix`, in the IPAC archive. """
+        sffd = str(self.filefracday)
+        return f'https://irsa.ipac.caltech.edu/ibe/data/ztf/' \
+               f'products/sci/{sffd[:4]}/{sffd[4:8]}/{sffd[8:]}/' \
+               f'ztf_{sffd}_{self.field:06d}_' \
+               f'{self.filtercode}_c{self.ccdid:02d}_' \
+               f'{self.imgtypecode}_q{self.qid}_{suffix}'
+
+    def download(self, suffix='sciimg.fits', destination=None,
+                 cookie=None):
+
+        if destination is None:
+            destination = Path.cwd()
+
+        destination = Path(destination)
+        if destination.is_dir():
+            destination /= self.basename.replace('sciimg.fits', suffix)
+
+        if cookie is None:
+            cookie = ipac_authenticate()
+
+        target = self.ipac_path(suffix)
+        safe_download(target=target, destination=destination, cookie=cookie,
+                      raise_exc=True)
+
 

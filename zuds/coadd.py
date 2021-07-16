@@ -4,6 +4,7 @@ import warnings
 import shutil
 import uuid
 import subprocess
+from subprocess import DEVNULL, STDOUT
 
 import sqlalchemy as sa
 from sqlalchemy.ext.declarative import declared_attr
@@ -26,7 +27,7 @@ def _coadd_from_images(cls, images, outname, data_product=False,
                        tmpdir='/tmp', sci_swarp_kws=None,
                        mask_swarp_kws=None, calculate_seeing=True, addbkg=True,
                        enforce_partition=True, solve_astrometry=False,
-                       swarp_zp_key='MAGZP', scamp_kws=None, set_date=True):
+                       swarp_zp_key='MAGZP', scamp_kws=None, set_date=True, use_existing_record=True):
 
     """Make a coadd from a bunch of input images"""
     from .swarp import prepare_swarp_sci, prepare_swarp_mask
@@ -37,13 +38,14 @@ def _coadd_from_images(cls, images, outname, data_product=False,
     basename = os.path.basename(outname)
 
     # see if a file with this name already exists in the DB
+    '''
     predecessor = cls.get_by_basename(basename)
 
     if predecessor is not None:
         warnings.warn(f'WARNING: A "{cls}" object with the basename '
                       f'"{basename}" already exists. The record will be '
                       f'updated...')
-
+    '''
     properties = GROUP_PROPERTIES
 
     if enforce_partition:
@@ -112,13 +114,14 @@ def _coadd_from_images(cls, images, outname, data_product=False,
             )
         else:
             transact_cat_name = directory / image.catalog.basename
-            transact_cat = PipelineFITSCatalog.from_file(transact_cat_name)
+            transact_cat = PipelineFITSCatalog.from_file(transact_cat_name, use_existing_record=use_existing_record)
             transact_image.catalog = transact_cat
 
         transact_images.append(transact_image)
-
+    
     if solve_astrometry:
         from .scamp import calibrate_astrometry
+        print('Solving astrometry')
         calibrate_astrometry(transact_images, scamp_kws=scamp_kws,
                              tmpdir=tmpdir)
 
@@ -130,7 +133,7 @@ def _coadd_from_images(cls, images, outname, data_product=False,
     # run swarp
     while True:
         try:
-            subprocess.check_call(command.split())
+            subprocess.check_call(command.split(),stdout=DEVNULL, stderr=STDOUT)
         except OSError as e:
             if e.errno == 14:
                 continue
@@ -153,7 +156,7 @@ def _coadd_from_images(cls, images, outname, data_product=False,
     # run swarp
     while True:
         try:
-            subprocess.check_call(command.split())
+            subprocess.check_call(command.split(),stdout=DEVNULL, stderr=STDOUT)
         except OSError as e:
             if e.errno == 14:
                 continue
@@ -176,10 +179,10 @@ def _coadd_from_images(cls, images, outname, data_product=False,
         shutil.copy(key, product_map[key])
 
     # load the result
-    coadd = cls.from_file(outname, load_others=False)
+    coadd = cls.from_file(outname, load_others=False, use_existing_record=False)
     coadd._weightimg = FITSImage.from_file(weight_outname)
 
-    coaddmask = MaskImage.from_file(mskoutname)
+    coaddmask = MaskImage.from_file(mskoutname, use_existing_record=False)
     coaddmaskweight = FITSImage.from_file(mskoutweightname)
     coaddmask.update_from_weight_map(coaddmaskweight)
 

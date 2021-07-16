@@ -2,6 +2,7 @@ import os
 import shutil
 import uuid
 import subprocess
+from subprocess import DEVNULL, STDOUT
 import numpy as np
 from pathlib import Path
 import sqlalchemy as sa
@@ -10,7 +11,7 @@ from sqlalchemy.orm import relationship
 
 from .core import DBSession
 from .fitsfile import HasWCS
-from .image import (CalibratableImageBase, ScienceImage, CalibratableImage,
+from .image import (CalibratableImageBase, ScienceImage, PTFScienceImage, CalibratableImage,
                     FITSImage, CalibratedImage)
 from .mask import MaskImageBase, MaskImage
 from .coadd import _coadd_from_images, ScienceCoadd
@@ -159,8 +160,8 @@ class Subtraction(HasWCS):
         }
 
         # run HOTPANTS
-        subprocess.check_call(command.split())
-
+        #subprocess.check_call(command.split())
+        subprocess.check_call(command.split(),stdout=DEVNULL, stderr=STDOUT) 
         # now modify the sub mask to include the stuff that's masked out from
         # hotpants
 
@@ -183,12 +184,12 @@ class Subtraction(HasWCS):
             shutil.copy(f, product_map[f])
 
         # now read the final output products into database mapped records
-        sub = cls.from_file(final_out, load_others=False)
+        sub = cls.from_file(final_out, load_others=False,use_existing_record=False)
         finalsubmask = MaskImage.from_file(final_out.replace('.fits',
-                                                             '.mask.fits'))
+                                                             '.mask.fits'),use_existing_record=False)
 
         sub._rmsimg = FITSImage.from_file(final_out.replace('.fits',
-                                                            '.rms.fits'))
+                                                            '.rms.fits'),use_existing_record=False)
 
         sub.header['FIELD'] = sub.field = sci.field
         sub.header['CCDID'] = sub.ccdid = sci.ccdid
@@ -204,16 +205,27 @@ class Subtraction(HasWCS):
         finalsubmask.parent_image = sub
         sub.reference_image = ref
         sub.target_image = sci
+        try:
+            sub.header['SEEING'] = sci.header['SEEING']
+            sub.header_comments['SEEING'] = sci.header_comments['SEEING']
+        except KeyError:
+            sub.header['MEDFWHM'] = sci.header['MEDFWHM']
+            sub.header_comments['MEDFWHM'] = sci.header_comments['MEDFWHM']
 
-        sub.header['SEEING'] = sci.header['SEEING']
-        sub.header_comments['SEEING'] = sci.header_comments['SEEING']
 
         if isinstance(sub, CalibratedImage):
-            sub.header['MAGZP'] = sci.header['MAGZP']
-            sub.header[APER_KEY] = sci.header[APER_KEY]
-            sub.header_comments['MAGZP'] = sci.header_comments['MAGZP']
-            sub.header_comments[APER_KEY] = sci.header_comments[APER_KEY]
-
+            if isinstance(sub,ScienceImage):
+                sub.header['MAGZP'] = sci.header['MAGZP']
+                sub.header[APER_KEY] = sci.header[APER_KEY]
+                sub.header_comments['MAGZP'] = sci.header_comments['MAGZP']
+                sub.header_comments[APER_KEY] = sci.header_comments[APER_KEY]
+            if isinstance(sub,PTFScienceImage):
+                
+                sub.header['MAGZPT'] = sci.header['MAGZPT']
+                sub.header[APER_KEY] = sci.header[APER_KEY]
+                sub.header_comments['MAGZPT'] = sci.header_comments['MAGZPT']
+                sub.header_comments[APER_KEY] = sci.header_comments[APER_KEY]
+            
         sub.save()
         sub.mask_image.save()
 
@@ -309,7 +321,7 @@ class MultiEpochSubtraction(Subtraction, CalibratableImage):
                                    sci_swarp_kws=kwargs,
                                    mask_swarp_kws=kwargs,
                                    addbkg=False,
-                                   calculate_seeing=False)
+                                   calculate_seeing=False,solve_astrometry=True)
 
         coadd.reference_image = ref
         coadd.target_image = sci

@@ -35,11 +35,16 @@ def prepare_hotpants(sci, ref, outname, submask, directory,  tmpdir='/tmp',
     impaths = [im.local_path for im in [scimbkg, ref]]
     scipath, refpath = impaths
 
-    if 'SEEING' not in sci.header:
+    if 'SEEING' not in sci.header and 'MEDFWHM' not in sci.header:
         estimate_seeing(sci)
         sci.save()
 
-    seepix = sci.header['SEEING']  # header seeing is FWHM in pixels
+    try:
+        seepix = sci.header['SEEING']  # header seeing is FWHM in pixels
+    except KeyError:
+        seepix = sci.header['MEDFWHM'] 
+
+
     r = 2.5 * seepix
     rss = 6. * seepix
 
@@ -91,7 +96,7 @@ def prepare_hotpants(sci, ref, outname, submask, directory,  tmpdir='/tmp',
 
     if 'ko' not in hotpants_kws:
         syscall += ' -ko 4'
-
+    
     return syscall
 
 

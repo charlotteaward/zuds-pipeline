@@ -5,7 +5,7 @@ from sqlalchemy.dialects import postgresql as psql
 from sqlalchemy.orm import relationship
 from sqlalchemy.ext.hybrid import hybrid_property
 from sqlalchemy.schema import UniqueConstraint
-
+from astropy import units as u
 from .core import Base
 from .constants import APER_KEY, APERTURE_RADIUS
 
@@ -23,7 +23,7 @@ class ForcedPhotometry(Base):
     @property
     def mag(self):
         return -2.5 * np.log10(self.flux) + self.image.header['MAGZP'] + \
-               self.image.header[APER_KEY]
+               self.image.header[self.apcorkey]
 
     @property
     def magerr(self):
@@ -41,7 +41,8 @@ class ForcedPhotometry(Base):
                           sa.ForeignKey('sources.id', ondelete='CASCADE'),
                           index=True)
     source = relationship('Source', cascade='all')
-
+    
+    apcorkey='APCOR5'
     flux = sa.Column(sa.Float)
     fluxerr = sa.Column(sa.Float)
 
@@ -115,7 +116,7 @@ def raw_aperture_photometry(sci_path, rms_path, mask_path, ra, dec,
 
 def aperture_photometry(calibratable, ra, dec, apply_calibration=False,
                         assume_background_subtracted=False, use_cutout=False,
-                        direct_load=None):
+                        direct_load=None, survey='ZTF',apfactor=1.0,seeing=1.0):
 
     import photutils
     from astropy.coordinates import SkyCoord
@@ -130,8 +131,29 @@ def aperture_photometry(calibratable, ra, dec, apply_calibration=False,
     if not use_cutout:
 
         wcs = calibratable.wcs
+        
+        if seeing*3*apfactor < 2.5:
+            apcorkey='APCOR1'
+            aprad=2.0
+        elif seeing*3*apfactor >=2.5 and seeing*3*apfactor<3.5:
+            apcorkey='APCOR2'
+            aprad=3.0
+        elif seeing*3*apfactor >=3.5 and 3*apfactor*seeing<5.0:
+            apcorkey='APCOR3'
+            aprad=4.0
+        elif seeing*3*apfactor >=5.0 and 3*apfactor*seeing<8.0:
+            apcorkey='APCOR4'
+            aprad=6.0
+        elif seeing*3*apfactor >=8.0 and 3*apfactor*seeing<12.0:
+            apcorkey='APCOR5'
+            aprad=10.0
+        elif seeing*3*apfactor >=12.0:
+            apcorkey='APCOR6' 
+            aprad=14
 
-        apertures = photutils.SkyCircularAperture(coord, r=APERTURE_RADIUS)
+        
+        aprad=aprad*u.pixel
+        apertures = photutils.SkyCircularAperture(coord, r=aprad)#APERTURE_RADIUS*apfactor*seeing)
 
         # something that is photometerable implements mask, background, and wcs
         if not assume_background_subtracted:
@@ -146,8 +168,13 @@ def aperture_photometry(calibratable, ra, dec, apply_calibration=False,
         phot_table = photutils.aperture_photometry(pixels_bkgsub, apertures,
                                                    error=bkgrms,
                                                    wcs=wcs)
+       
+        
+        if survey=='PTF':
+            phot_table['zp'] = calibratable.header['IMAGEZPT']#['LMGAPCZP']# + calibratable.header['APCOR4']
+        else:
+            phot_table['zp'] = calibratable.header['MAGZP'] + calibratable.header[apcorkey]#'APCOR4']
 
-        phot_table['zp'] = calibratable.header['MAGZP'] + calibratable.header['APCOR4']
         phot_table['obsjd'] = calibratable.header['OBSJD']
         phot_table['filtercode'] = 'z' + calibratable.header['FILTER'][-1]
 
@@ -191,11 +218,11 @@ def aperture_photometry(calibratable, ra, dec, apply_calibration=False,
             nx = calibratable.header['NAXIS1']
             ny = calibratable.header['NAXIS2']
 
-            xmin = max(0, pixx - 1.5 * APERTURE_RADIUS.value)
-            xmax = min(nx, pixx + 1.5 * APERTURE_RADIUS.value)
+            xmin = max(0, pixx - 1.5 * aprad)#APERTURE_RADIUS.value * seeing * apfactor)
+            xmax = min(nx, pixx + 1.5 * aprad)#APERTURE_RADIUS.value * seeing * apfactor)
 
-            ymin = max(0, pixy - 1.5 * APERTURE_RADIUS.value)
-            ymax = min(ny, pixy + 1.5 * APERTURE_RADIUS.value)
+            ymin = max(0, pixy - 1.5 * aprad)#APERTURE_RADIUS.value * seeing * apfactor)
+            ymax = min(ny, pixy + 1.5 * aprad)#APERTURE_RADIUS.value * seeing * apfactor)
 
             ixmin = int(np.floor(xmin))
             ixmax = int(np.ceil(xmax))
@@ -204,8 +231,7 @@ def aperture_photometry(calibratable, ra, dec, apply_calibration=False,
             iymax = int(np.ceil(ymax))
 
             ap = photutils.CircularAperture([pixx - ixmin, pixy - iymin],
-                                            APERTURE_RADIUS.value)
-
+                                            aprad)#APERTURE_RADIUS.value * seeing * apfactor)
 
             # something that is photometerable implements mask, background, and wcs
             with fits.open(
@@ -231,11 +257,22 @@ def aperture_photometry(calibratable, ra, dec, apply_calibration=False,
         phot_table = vstack(phot_table)
 
     if apply_calibration:
-        magzp = calibratable.header['MAGZP']
-        apcor = calibratable.header[APER_KEY]
+        
+        if survey=='PTF':
+            
+            magzp = calibratable.header['IMAGEZPT']
+            #apcor = calibratable.header[APER_KEY]
 
-        phot_table['mag'] = -2.5 * np.log10(phot_table['aperture_sum']) + magzp + apcor
-        phot_table['magerr'] = 1.0826 * phot_table['aperture_sum_err'] / phot_table['aperture_sum']
+            phot_table['mag'] = -2.5 * np.log10(phot_table['aperture_sum']) + magzp# + apcor
+            phot_table['magerr'] = 1.0826 * phot_table['aperture_sum_err'] / phot_table['aperture_sum']
+
+
+        else:
+            magzp = calibratable.header['MAGZP']
+            apcor = calibratable.header[apcorkey]#APER_KEY]
+
+            phot_table['mag'] = -2.5 * np.log10(phot_table['aperture_sum']) + magzp + apcor
+            phot_table['magerr'] = 1.0826 * phot_table['aperture_sum_err'] / phot_table['aperture_sum']
 
 
     # check for invalid photometry on masked pixels
